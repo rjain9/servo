@@ -1796,6 +1796,19 @@ fn test_referrer_with_strictorigin_policy_https_to_https() {
     assert_referrer_header_matches(&origin_info, request_url, expected_referrer);
 }
 
+fn test_no_referrer_with_strictoriginwhencrossorigin_policy_https_to_http() {
+    let request_url = "https://mozilla.com";
+    let referrer_url = "http://mozilla.com/some/path";
+    let referrer_policy = Some(ReferrerPolicy::StrictOriginWhenCrossOrigin);
+    
+    let origin_info = LoadOriginInfo {
+        referrer_url: referrer_url,
+        referrer_policy: referrer_policy
+    };
+
+    assert_referrer_header_not_included(&origin_info, request_url);
+}
+
 #[test]
 fn test_referrer_set_to_ref_url_with_noreferrerwhendowngrade_policy_https_to_https() {
     let request_url = "https://mozilla.com";
