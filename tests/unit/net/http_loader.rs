@@ -1886,6 +1886,21 @@ fn test_referrer_set_with_strictoriginwhencrossorigin_policy_http_to_http_cross_
 }
 
 #[test]
+fn test_referrer_set_with_strictoriginwhencrossorigin_policy_http_to_http_same_orig() {
+    let request_url = "http://mozilla.com";
+    let referrer_url = "http://mozilla.com/some/path";
+    let referrer_policy = Some(ReferrerPolicy::StrictOrigin);
+	let expected_referrer = "http://mozilla.com/some/path";
+	
+    let origin_info = LoadOriginInfo {
+        referrer_url: referrer_url,
+        referrer_policy: referrer_policy
+    };
+
+    assert_referrer_header_matches(&origin_info, request_url, expected_referrer);
+}
+
+#[test]
 fn test_referrer_set_to_ref_url_with_noreferrerwhendowngrade_policy_https_to_https() {
     let request_url = "https://mozilla.com";
     let referrer_url = "https://username:password@mozilla.com/some/path#fragment";
