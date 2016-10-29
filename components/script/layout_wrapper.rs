@@ -133,7 +133,6 @@ impl<'ln> NodeInfo for ServoLayoutNode<'ln> {
 impl<'ln> TNode for ServoLayoutNode<'ln> {
     type ConcreteElement = ServoLayoutElement<'ln>;
     type ConcreteDocument = ServoLayoutDocument<'ln>;
-    type ConcreteRestyleDamage = RestyleDamage;
     type ConcreteChildrenIterator = ServoChildrenIterator<'ln>;
 
     fn to_unsafe(&self) -> UnsafeNode {
@@ -186,12 +185,8 @@ impl<'ln> TNode for ServoLayoutNode<'ln> {
         self.node.downcast().map(ServoLayoutDocument::from_layout_js)
     }
 
-    fn is_dirty(&self) -> bool {
+    fn deprecated_dirty_bit_is_set(&self) -> bool {
         unsafe { self.node.get_flag(IS_DIRTY) }
-    }
-
-    unsafe fn set_dirty(&self) {
-        self.node.set_flag(IS_DIRTY, true)
     }
 
     fn has_dirty_descendants(&self) -> bool {
@@ -240,25 +235,10 @@ impl<'ln> TNode for ServoLayoutNode<'ln> {
         debug_assert!(self.is_text_node());
         let mut data = self.get_partial_layout_data().unwrap().borrow_mut();
         data.style_data.style_text_node(style);
-        if self.has_changed() {
-            data.restyle_damage = RestyleDamage::rebuild_and_reflow();
-        }
     }
 
     fn borrow_data(&self) -> Option<AtomicRef<NodeData>> {
         self.get_style_data().map(|d| d.borrow())
-    }
-
-    fn restyle_damage(self) -> RestyleDamage {
-        self.get_partial_layout_data().unwrap().borrow().restyle_damage
-    }
-
-    fn set_restyle_damage(self, damage: RestyleDamage) {
-        let mut damage = damage;
-        if self.has_changed() {
-            damage = RestyleDamage::rebuild_and_reflow();
-        }
-        self.get_partial_layout_data().unwrap().borrow_mut().restyle_damage = damage;
     }
 
     fn parent_node(&self) -> Option<ServoLayoutNode<'ln>> {
@@ -289,14 +269,6 @@ impl<'ln> TNode for ServoLayoutNode<'ln> {
         unsafe {
             self.node.next_sibling_ref().map(|node| self.new_with_this_lifetime(&node))
         }
-    }
-
-    #[inline]
-    fn existing_style_for_restyle_damage<'a>(&'a self,
-                                             current_cv: Option<&'a Arc<ComputedValues>>,
-                                             _pseudo_element: Option<&PseudoElement>)
-                                             -> Option<&'a Arc<ComputedValues>> {
-        current_cv
     }
 }
 
@@ -358,6 +330,14 @@ impl<'ln> LayoutNode for ServoLayoutNode<'ln> {
 }
 
 impl<'ln> ServoLayoutNode<'ln> {
+    pub fn is_dirty(&self) -> bool {
+        unsafe { self.node.get_flag(IS_DIRTY) }
+    }
+
+    pub unsafe fn set_dirty(&self) {
+        self.node.set_flag(IS_DIRTY, true)
+    }
+
     fn get_partial_layout_data(&self) -> Option<&AtomicRefCell<PartialPersistentLayoutData>> {
         unsafe {
             self.get_jsmanaged().get_style_and_layout_data().map(|d| {
@@ -397,7 +377,9 @@ impl<'ln> ServoLayoutNode<'ln> {
 
     fn debug_str(self) -> String {
         format!("{:?}: changed={} dirty={} dirty_descendants={}",
-                self.script_type_id(), self.has_changed(), self.is_dirty(), self.has_dirty_descendants())
+                self.script_type_id(), self.has_changed(),
+                self.deprecated_dirty_bit_is_set(),
+                self.has_dirty_descendants())
     }
 
     fn debug_style_str(self) -> String {
@@ -487,6 +469,7 @@ impl<'le> PresentationalHintsSynthetizer for ServoLayoutElement<'le> {
 impl<'le> TElement for ServoLayoutElement<'le> {
     type ConcreteNode = ServoLayoutNode<'le>;
     type ConcreteDocument = ServoLayoutDocument<'le>;
+    type ConcreteRestyleDamage = RestyleDamage;
 
     fn as_node(&self) -> ServoLayoutNode<'le> {
         ServoLayoutNode::from_layout_js(self.element.upcast())
@@ -510,6 +493,19 @@ impl<'le> TElement for ServoLayoutElement<'le> {
     #[inline]
     fn attr_equals(&self, namespace: &Namespace, attr: &Atom, val: &Atom) -> bool {
         self.get_attr(namespace, attr).map_or(false, |x| x == val)
+    }
+
+    fn set_restyle_damage(self, damage: RestyleDamage) {
+        let node = self.as_node();
+        node.get_partial_layout_data().unwrap().borrow_mut().restyle_damage = damage;
+    }
+
+    #[inline]
+    fn existing_style_for_restyle_damage<'a>(&'a self,
+                                             current_cv: Option<&'a Arc<ComputedValues>>,
+                                             _pseudo_element: Option<&PseudoElement>)
+                                             -> Option<&'a Arc<ComputedValues>> {
+        current_cv
     }
 }
 
@@ -763,15 +759,19 @@ impl<'ln> ServoThreadSafeLayoutNode<'ln> {
 
 impl<'ln> NodeInfo for ServoThreadSafeLayoutNode<'ln> {
     fn is_element(&self) -> bool {
-        if let Some(LayoutNodeType::Element(_)) = self.type_id() { true } else { false }
+        self.pseudo == PseudoElementType::Normal && self.node.is_element()
     }
 
     fn is_text_node(&self) -> bool {
-        if let Some(LayoutNodeType::Text) = self.type_id() { true } else { false }
+        // It's unlikely that text nodes will ever be used to implement a
+        // pseudo-element, but the type system doesn't really enforce that,
+        // so we check to be safe.
+        self.pseudo == PseudoElementType::Normal && self.node.is_text_node()
     }
 
     fn needs_layout(&self) -> bool {
-        self.pseudo != PseudoElementType::Normal || self.is_element() || self.is_text_node()
+        self.pseudo != PseudoElementType::Normal ||
+        self.node.is_element() || self.node.is_text_node()
     }
 }
 
@@ -802,6 +802,21 @@ impl<'ln> ThreadSafeLayoutNode for ServoThreadSafeLayoutNode<'ln> {
     #[inline]
     fn type_id_without_excluding_pseudo_elements(&self) -> LayoutNodeType {
         self.node.type_id()
+    }
+
+    fn style_for_text_node(&self) -> Arc<ComputedValues> {
+        // Text nodes get a copy of the parent style. Inheriting all non-
+        // inherited properties into the text node is odd from a CSS
+        // perspective, but makes fragment construction easier (by making
+        // properties like vertical-align on fragments have values that
+        // match the parent element). This is an implementation detail of
+        // Servo layout that is not central to how fragment construction
+        // works, but would be difficult to change. (Text node style is
+        // also not visible to script.)
+        debug_assert!(self.is_text_node());
+        let parent = self.node.parent_node().unwrap();
+        let parent_data = parent.get_style_data().unwrap().borrow();
+        parent_data.current_styles().primary.clone()
     }
 
     fn debug_id(self) -> usize {
@@ -856,11 +871,22 @@ impl<'ln> ThreadSafeLayoutNode for ServoThreadSafeLayoutNode<'ln> {
     }
 
     fn restyle_damage(self) -> RestyleDamage {
-        self.node.restyle_damage()
+        if self.node.has_changed() {
+            RestyleDamage::rebuild_and_reflow()
+        } else if self.is_text_node() {
+            let parent = self.node.parent_node().unwrap();
+            let parent_data = parent.get_partial_layout_data().unwrap().borrow();
+            parent_data.restyle_damage
+        } else {
+            self.node.get_partial_layout_data().unwrap().borrow().restyle_damage
+        }
     }
 
-    fn set_restyle_damage(self, damage: RestyleDamage) {
-        self.node.set_restyle_damage(damage)
+    fn clear_restyle_damage(self) {
+        if self.is_element() {
+            let mut data = self.node.get_partial_layout_data().unwrap().borrow_mut();
+            data.restyle_damage = RestyleDamage::empty();
+        }
     }
 
     fn can_be_fragmented(&self) -> bool {

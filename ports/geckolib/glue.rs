@@ -8,12 +8,10 @@ use env_logger;
 use euclid::Size2D;
 use parking_lot::RwLock;
 use std::mem::transmute;
-use std::slice;
-use std::str::from_utf8_unchecked;
 use std::sync::{Arc, Mutex};
 use style::arc_ptr_eq;
 use style::context::{LocalStyleContextCreationInfo, ReflowGoal, SharedStyleContext};
-use style::dom::{NodeInfo, TElement, TNode};
+use style::dom::{NodeInfo, StylingMode, TElement, TNode};
 use style::error_reporting::StdoutErrorReporter;
 use style::gecko::data::{NUM_THREADS, PerDocumentStyleData};
 use style::gecko::selector_impl::{GeckoSelectorImpl, PseudoElement};
@@ -29,6 +27,7 @@ use style::gecko_bindings::bindings::{RawServoStyleSheetStrong, ServoComputedVal
 use style::gecko_bindings::bindings::{ThreadSafePrincipalHolder, ThreadSafeURIHolder};
 use style::gecko_bindings::bindings::Gecko_Utf8SliceToString;
 use style::gecko_bindings::bindings::ServoComputedValuesBorrowedOrNull;
+use style::gecko_bindings::bindings::nsACString;
 use style::gecko_bindings::structs::{SheetParsingMode, nsIAtom};
 use style::gecko_bindings::structs::ServoElementSnapshot;
 use style::gecko_bindings::structs::nsRestyleHint;
@@ -38,7 +37,7 @@ use style::gecko_bindings::sugar::ownership::{HasSimpleFFI, Strong};
 use style::gecko_bindings::sugar::refptr::{GeckoArcPrincipal, GeckoArcURI};
 use style::parallel;
 use style::parser::{ParserContext, ParserContextExtraData};
-use style::properties::{ComputedValues, Importance, PropertyDeclaration};
+use style::properties::{CascadeFlags, ComputedValues, Importance, PropertyDeclaration};
 use style::properties::{PropertyDeclarationParseResult, PropertyDeclarationBlock};
 use style::properties::{cascade, parse_one_declaration};
 use style::selector_impl::PseudoElementCascadeType;
@@ -107,8 +106,11 @@ fn restyle_subtree(node: GeckoNode, raw_data: RawServoStyleSetBorrowed) {
         timer: Timer::new(),
     };
 
-    // We ensure this is true before calling Servo_RestyleSubtree()
-    debug_assert!(node.is_dirty() || node.has_dirty_descendants());
+    if node.styling_mode() == StylingMode::Stop {
+        error!("Unnecessary call to restyle_subtree");
+        return;
+    }
+
     if per_doc_data.num_threads == 1 || per_doc_data.work_queue.is_none() {
         sequential::traverse_dom::<GeckoNode, RecalcStyleOnly>(node, &shared_style_context);
     } else {
@@ -141,11 +143,11 @@ pub extern "C" fn Servo_RestyleWithAddedDeclaration(declarations: RawServoDeclar
     // FIXME (bug 1303229): Use the actual viewport size here
     let (computed, _) = cascade(Size2D::new(Au(0), Au(0)),
                                 &[declaration_block],
-                                false,
                                 Some(previous_style),
                                 None,
                                 None,
-                                Box::new(StdoutErrorReporter));
+                                Box::new(StdoutErrorReporter),
+                                CascadeFlags::empty());
     Arc::new(computed).into_strong()
 }
 
@@ -161,16 +163,14 @@ pub extern "C" fn Servo_Node_ClearNodeData(node: RawGeckoNodeBorrowed) -> () {
 }
 
 #[no_mangle]
-pub extern "C" fn Servo_StyleSheet_FromUTF8Bytes(bytes: *const u8,
-                                                length: u32,
-                                                mode: SheetParsingMode,
-                                                base_bytes: *const u8,
-                                                base_length: u32,
-                                                base: *mut ThreadSafeURIHolder,
-                                                referrer: *mut ThreadSafeURIHolder,
-                                                principal: *mut ThreadSafePrincipalHolder)
-                                                -> RawServoStyleSheetStrong {
-    let input = unsafe { from_utf8_unchecked(slice::from_raw_parts(bytes, length as usize)) };
+pub extern "C" fn Servo_StyleSheet_FromUTF8Bytes(data: *const nsACString,
+                                                 mode: SheetParsingMode,
+                                                 base_url: *const nsACString,
+                                                 base: *mut ThreadSafeURIHolder,
+                                                 referrer: *mut ThreadSafeURIHolder,
+                                                 principal: *mut ThreadSafePrincipalHolder)
+                                                 -> RawServoStyleSheetStrong {
+    let input = unsafe { data.as_ref().unwrap().as_str_unchecked() };
 
     let origin = match mode {
         SheetParsingMode::eAuthorSheetFeatures => Origin::Author,
@@ -178,7 +178,7 @@ pub extern "C" fn Servo_StyleSheet_FromUTF8Bytes(bytes: *const u8,
         SheetParsingMode::eAgentSheetFeatures => Origin::UserAgent,
     };
 
-    let base_str = unsafe { from_utf8_unchecked(slice::from_raw_parts(base_bytes, base_length as usize)) };
+    let base_str = unsafe { base_url.as_ref().unwrap().as_str_unchecked() };
     let url = Url::parse(base_str).unwrap();
     let extra_data = unsafe { ParserContextExtraData {
         base: Some(GeckoArcURI::new(base)),
@@ -282,7 +282,7 @@ pub extern "C" fn Servo_ComputedValues_GetForAnonymousBox(parent_style_or_null: 
 
 
     let maybe_parent = ComputedValues::arc_from_borrowed(&parent_style_or_null);
-    let new_computed = data.stylist.precomputed_values_for_pseudo(&pseudo, maybe_parent);
+    let new_computed = data.stylist.precomputed_values_for_pseudo(&pseudo, maybe_parent, false);
     new_computed.map_or(Strong::null(), |c| c.into_strong())
 }
 
@@ -367,23 +367,14 @@ pub extern "C" fn Servo_StyleSet_Drop(data: RawServoStyleSetOwned) -> () {
 
 
 #[no_mangle]
-pub extern "C" fn Servo_ParseProperty(property_bytes: *const u8,
-                                      property_length: u32,
-                                      value_bytes: *const u8,
-                                      value_length: u32,
-                                      base_bytes: *const u8,
-                                      base_length: u32,
-                                      base: *mut ThreadSafeURIHolder,
+pub extern "C" fn Servo_ParseProperty(property: *const nsACString, value: *const nsACString,
+                                      base_url: *const nsACString, base: *mut ThreadSafeURIHolder,
                                       referrer: *mut ThreadSafeURIHolder,
                                       principal: *mut ThreadSafePrincipalHolder)
                                       -> RawServoDeclarationBlockStrong {
-    // All this string wrangling is temporary until the Gecko string bindings land (bug 1294742).
-    let name = unsafe { from_utf8_unchecked(slice::from_raw_parts(property_bytes,
-                                                                  property_length as usize)) };
-    let value_str = unsafe { from_utf8_unchecked(slice::from_raw_parts(value_bytes,
-                                                                       value_length as usize)) };
-    let base_str = unsafe { from_utf8_unchecked(slice::from_raw_parts(base_bytes,
-                                                                      base_length as usize)) };
+    let name = unsafe { property.as_ref().unwrap().as_str_unchecked() };
+    let value = unsafe { value.as_ref().unwrap().as_str_unchecked() };
+    let base_str = unsafe { base_url.as_ref().unwrap().as_str_unchecked() };
     let base_url = Url::parse(base_str).unwrap();
     let extra_data = unsafe { ParserContextExtraData {
         base: Some(GeckoArcURI::new(base)),
@@ -396,7 +387,7 @@ pub extern "C" fn Servo_ParseProperty(property_bytes: *const u8,
                                                      extra_data);
 
     let mut results = vec![];
-    match PropertyDeclaration::parse(name, &context, &mut Parser::new(value_str),
+    match PropertyDeclaration::parse(name, &context, &mut Parser::new(value),
                                      &mut results, false) {
         PropertyDeclarationParseResult::ValidOrIgnoredDeclaration => {},
         _ => return RawServoDeclarationBlockStrong::null(),
@@ -411,9 +402,8 @@ pub extern "C" fn Servo_ParseProperty(property_bytes: *const u8,
 }
 
 #[no_mangle]
-pub extern "C" fn Servo_ParseStyleAttribute(bytes: *const u8, length: u32)
-                                            -> RawServoDeclarationBlockStrong {
-    let value = unsafe { from_utf8_unchecked(slice::from_raw_parts(bytes, length as usize)) };
+pub extern "C" fn Servo_ParseStyleAttribute(data: *const nsACString) -> RawServoDeclarationBlockStrong {
+    let value = unsafe { data.as_ref().unwrap().as_str_unchecked() };
     Arc::new(RwLock::new(GeckoElement::parse_style_attribute(value))).into_strong()
 }
 
@@ -467,10 +457,9 @@ pub extern "C" fn Servo_DeclarationBlock_SerializeOneValue(
 }
 
 #[no_mangle]
-pub extern "C" fn Servo_CSSSupports(property: *const u8, property_length: u32,
-                                    value: *const u8, value_length: u32) -> bool {
-    let property = unsafe { from_utf8_unchecked(slice::from_raw_parts(property, property_length as usize)) };
-    let value    = unsafe { from_utf8_unchecked(slice::from_raw_parts(value, value_length as usize)) };
+pub extern "C" fn Servo_CSSSupports(property: *const nsACString, value: *const nsACString) -> bool {
+    let property = unsafe { property.as_ref().unwrap().as_str_unchecked() };
+    let value = unsafe { value.as_ref().unwrap().as_str_unchecked() };
 
     let base_url = &*DUMMY_BASE_URL;
     let extra_data = ParserContextExtraData::default();

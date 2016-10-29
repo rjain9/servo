@@ -2,8 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+use atomic_refcell::AtomicRefCell;
 use context::{LocalStyleContext, SharedStyleContext, StyleContext};
-use dom::OpaqueNode;
+use data::NodeData;
+use dom::{NodeInfo, OpaqueNode, TNode};
 use gecko::context::StandaloneStyleContext;
 use gecko::wrapper::GeckoNode;
 use std::mem;
@@ -29,7 +31,14 @@ impl<'lc, 'ln> DomTraversalContext<GeckoNode<'ln>> for RecalcStyleOnly<'lc> {
     }
 
     fn process_preorder(&self, node: GeckoNode<'ln>) -> RestyleResult {
-        recalc_style_at(&self.context, self.root, node)
+        if node.is_text_node() {
+            // Text nodes don't have children, so save the traversal algorithm
+            // the trouble of iterating the children.
+            RestyleResult::Stop
+        } else {
+            let el = node.as_element().unwrap();
+            recalc_style_at::<_, _, Self>(&self.context, self.root, el)
+        }
     }
 
     fn process_postorder(&self, _: GeckoNode<'ln>) {
@@ -38,6 +47,10 @@ impl<'lc, 'ln> DomTraversalContext<GeckoNode<'ln>> for RecalcStyleOnly<'lc> {
 
     /// We don't use the post-order traversal for anything.
     fn needs_postorder_traversal(&self) -> bool { false }
+
+    fn ensure_node_data<'a>(node: &'a GeckoNode<'ln>) -> &'a AtomicRefCell<NodeData> {
+        node.ensure_data()
+    }
 
     fn local_context(&self) -> &LocalStyleContext {
         self.context.local_context()

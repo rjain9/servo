@@ -6,7 +6,7 @@
 
 
 use atomic_refcell::{AtomicRef, AtomicRefCell, AtomicRefMut};
-use data::{NodeData, NodeStyles};
+use data::NodeData;
 use dom::{LayoutIterator, NodeInfo, TDocument, TElement, TNode, TRestyleDamage, UnsafeNode};
 use dom::{OpaqueNode, PresentationalHintsSynthetizer};
 use element_state::ElementState;
@@ -22,12 +22,12 @@ use gecko_bindings::bindings::{Gecko_GetLastChild, Gecko_GetNextStyleChild};
 use gecko_bindings::bindings::{Gecko_GetServoDeclarationBlock, Gecko_IsHTMLElementInHTMLDocument};
 use gecko_bindings::bindings::{Gecko_IsLink, Gecko_IsRootElement};
 use gecko_bindings::bindings::{Gecko_IsUnvisitedLink, Gecko_IsVisitedLink, Gecko_Namespace};
+use gecko_bindings::bindings::{RawGeckoDocument, RawGeckoElement, RawGeckoNode};
 use gecko_bindings::bindings::Gecko_ClassOrClassList;
 use gecko_bindings::bindings::Gecko_GetStyleContext;
 use gecko_bindings::bindings::Gecko_SetNodeFlags;
 use gecko_bindings::structs;
 use gecko_bindings::structs::{NODE_HAS_DIRTY_DESCENDANTS_FOR_SERVO, NODE_IS_DIRTY_FOR_SERVO};
-use gecko_bindings::structs::{RawGeckoDocument, RawGeckoElement, RawGeckoNode};
 use gecko_bindings::structs::{nsChangeHint, nsIAtom, nsIContent, nsStyleContext};
 use gecko_bindings::sugar::ownership::FFIArcHelpers;
 use libc::uintptr_t;
@@ -95,18 +95,11 @@ impl<'ln> GeckoNode<'ln> {
                                                .get(pseudo).map(|c| c.clone()))
     }
 
-    fn styles_from_frame(&self) -> Option<NodeStyles> {
-        // FIXME(bholley): Once we start dropping NodeData from nodes when
-        // creating frames, we'll want to teach this method to actually get
-        // style data from the frame.
-        None
-    }
-
     fn get_node_data(&self) -> Option<&AtomicRefCell<NodeData>> {
         unsafe { self.0.mServoData.get().as_ref() }
     }
 
-    fn ensure_node_data(&self) -> &AtomicRefCell<NodeData> {
+    pub fn ensure_data(&self) -> &AtomicRefCell<NodeData> {
         match self.get_node_data() {
             Some(x) => x,
             None => {
@@ -167,7 +160,6 @@ impl<'ln> NodeInfo for GeckoNode<'ln> {
 impl<'ln> TNode for GeckoNode<'ln> {
     type ConcreteDocument = GeckoDocument<'ln>;
     type ConcreteElement = GeckoElement<'ln>;
-    type ConcreteRestyleDamage = GeckoRestyleDamage;
     type ConcreteChildrenIterator = GeckoChildrenIterator<'ln>;
 
     fn to_unsafe(&self) -> UnsafeNode {
@@ -224,18 +216,8 @@ impl<'ln> TNode for GeckoNode<'ln> {
         unimplemented!()
     }
 
-    fn is_dirty(&self) -> bool {
-        // Return true unconditionally if we're not yet styled. This is a hack
-        // and should go away soon.
-        if self.get_node_data().is_none() {
-            return true;
-        }
-
+    fn deprecated_dirty_bit_is_set(&self) -> bool {
         self.flags() & (NODE_IS_DIRTY_FOR_SERVO as u32) != 0
-    }
-
-    unsafe fn set_dirty(&self) {
-        self.set_flags(NODE_IS_DIRTY_FOR_SERVO as u32)
     }
 
     fn has_dirty_descendants(&self) -> bool {
@@ -271,27 +253,23 @@ impl<'ln> TNode for GeckoNode<'ln> {
     }
 
     fn begin_styling(&self) -> AtomicRefMut<NodeData> {
-        let mut data = self.ensure_node_data().borrow_mut();
-        data.gather_previous_styles(|| self.styles_from_frame());
+        let mut data = self.ensure_data().borrow_mut();
+        data.gather_previous_styles(|| self.get_styles_from_frame());
         data
     }
 
     fn style_text_node(&self, style: Arc<ComputedValues>) {
         debug_assert!(self.is_text_node());
-        self.ensure_node_data().borrow_mut().style_text_node(style);
+
+        // FIXME(bholley): Gecko currently relies on the dirty bit being set to
+        // drive the post-traversal. This will go away soon.
+        unsafe { self.set_flags(NODE_IS_DIRTY_FOR_SERVO as u32); }
+
+        self.ensure_data().borrow_mut().style_text_node(style);
     }
 
     fn borrow_data(&self) -> Option<AtomicRef<NodeData>> {
         self.get_node_data().map(|x| x.borrow())
-    }
-
-    fn restyle_damage(self) -> Self::ConcreteRestyleDamage {
-        // Not called from style, only for layout.
-        unimplemented!();
-    }
-
-    fn set_restyle_damage(self, damage: Self::ConcreteRestyleDamage) {
-        unsafe { Gecko_StoreStyleDifference(self.0, damage.0) }
     }
 
     fn parent_node(&self) -> Option<GeckoNode<'ln>> {
@@ -312,23 +290,6 @@ impl<'ln> TNode for GeckoNode<'ln> {
 
     fn next_sibling(&self) -> Option<GeckoNode<'ln>> {
         unsafe { self.0.mNextSibling.as_ref().map(GeckoNode::from_content) }
-    }
-
-    fn existing_style_for_restyle_damage<'a>(&'a self,
-                                             current_cv: Option<&'a Arc<ComputedValues>>,
-                                             pseudo: Option<&PseudoElement>)
-                                             -> Option<&'a nsStyleContext> {
-        if current_cv.is_none() {
-            // Don't bother in doing an ffi call to get null back.
-            return None;
-        }
-
-        unsafe {
-            let atom_ptr = pseudo.map(|p| p.as_atom().as_ptr())
-                                 .unwrap_or(ptr::null_mut());
-            let context_ptr = Gecko_GetStyleContext(self.0, atom_ptr);
-            context_ptr.as_ref()
-        }
     }
 
     fn needs_dirty_on_viewport_size_changed(&self) -> bool {
@@ -437,6 +398,7 @@ lazy_static! {
 impl<'le> TElement for GeckoElement<'le> {
     type ConcreteNode = GeckoNode<'le>;
     type ConcreteDocument = GeckoDocument<'le>;
+    type ConcreteRestyleDamage = GeckoRestyleDamage;
 
     fn as_node(&self) -> Self::ConcreteNode {
         unsafe { GeckoNode(&*(self.0 as *const _ as *const RawGeckoNode)) }
@@ -470,6 +432,31 @@ impl<'le> TElement for GeckoElement<'le> {
                                        attr.as_ptr(),
                                        val.as_ptr(),
                                        /* ignoreCase = */ false)
+        }
+    }
+
+    fn set_restyle_damage(self, damage: GeckoRestyleDamage) {
+        // FIXME(bholley): Gecko currently relies on the dirty bit being set to
+        // drive the post-traversal. This will go away soon.
+        unsafe { self.as_node().set_flags(NODE_IS_DIRTY_FOR_SERVO as u32) }
+
+        unsafe { Gecko_StoreStyleDifference(self.as_node().0, damage.0) }
+    }
+
+    fn existing_style_for_restyle_damage<'a>(&'a self,
+                                             current_cv: Option<&'a Arc<ComputedValues>>,
+                                             pseudo: Option<&PseudoElement>)
+                                             -> Option<&'a nsStyleContext> {
+        if current_cv.is_none() {
+            // Don't bother in doing an ffi call to get null back.
+            return None;
+        }
+
+        unsafe {
+            let atom_ptr = pseudo.map(|p| p.as_atom().as_ptr())
+                                 .unwrap_or(ptr::null_mut());
+            let context_ptr = Gecko_GetStyleContext(self.as_node().0, atom_ptr);
+            context_ptr.as_ref()
         }
     }
 }

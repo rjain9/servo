@@ -171,9 +171,6 @@ COMPILATION_TARGETS = {
             "nsTArrayHeader",
             "pair",
             "Position",
-            "RawGeckoDocument",
-            "RawGeckoElement",
-            "RawGeckoNode",
             "Runnable",
             "ServoAttrSnapshot",
             "ServoElementSnapshot",
@@ -236,7 +233,13 @@ COMPILATION_TARGETS = {
     # Generation of the ffi bindings.
     "bindings": {
         "target_dir": "../gecko_bindings",
-        "raw_lines": [],
+        "blacklist_types": [
+            "nsACString_internal",
+        ],
+        "raw_lines": [
+            "pub use nsstring::nsACString;",
+            "type nsACString_internal = nsACString;",
+        ],
         "flags": [
             "--ignore-methods",
         ],
@@ -248,14 +251,17 @@ COMPILATION_TARGETS = {
         "files": [
             "{}/dist/include/mozilla/ServoBindings.h",
         ],
-
-        # Types to just use from the `structs` target.
-        "structs_types": [
-            "FontFamilyList",
-            "FontFamilyType",
+        "whitelist": [
             "RawGeckoDocument",
             "RawGeckoElement",
             "RawGeckoNode",
+        ],
+
+        # Types to just use from the `structs` target.
+        "structs_types": [
+            "Element",
+            "FontFamilyList",
+            "FontFamilyType",
             "ServoElementSnapshot",
             "SheetParsingMode",
             "StyleBasicShape",
@@ -265,6 +271,8 @@ COMPILATION_TARGETS = {
             "nsChangeHint",
             "nsFont",
             "nsIAtom",
+            "nsIDocument",
+            "nsINode",
             "nsIPrincipal",
             "nsIURI",
             "nsMainThreadPtrHolder",
@@ -617,10 +625,10 @@ Option<&'a {0}>;".format(ty))
             flags = [debugger, "--args"] + flags
             subprocess.check_call(flags)
         else:
-            output = subprocess.check_output(flags, stderr=subprocess.STDOUT)
-            output = output.decode('utf8')
+            output = subprocess.check_output(flags, stderr=subprocess.STDOUT,
+                                             universal_newlines=True)
     except subprocess.CalledProcessError as e:
-        print("FAIL\n", e.output.decode('utf8'))
+        print("FAIL\n", e.output)
         return 1
 
     print("OK")
