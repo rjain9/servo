@@ -447,7 +447,7 @@ fn strict_origin(referrer_url: Url, url: Url) -> Option<Url> {
 }
 
 fn strict_origin_when_cross_origin(referrer_url: Url, url: Url) -> Option<Url> {
-    let cross_origin = ref_url.origin() != url.origin();
+    let cross_origin = referrer_url.origin() != url.origin();
     if referrer_url.scheme() == "https" && url.scheme() != "https" {
         return None;
     }

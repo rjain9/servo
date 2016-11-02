@@ -1939,7 +1939,9 @@ fn test_referrer_set_to_ref_url_with_noreferrerwhendowngrade_policy_https_to_htt
         referrer_url: referrer_url,
         referrer_policy: referrer_policy,
     }
-    #[test]
+       assert_referrer_header_matches(&origin_info, request_url, expected_referrer);
+}
+#[test]
 fn test_referrer_with_strictoriginwhencrossorigin_policy_https_to_https_cross_origin() {
     let request_url = "https://mozilla.com";
     let referrer_url = "http://mozilla.com/some/path";
@@ -1953,8 +1955,7 @@ fn test_referrer_with_strictoriginwhencrossorigin_policy_https_to_https_cross_or
 
     assert_referrer_header_matches(&origin_info, request_url, expected_referrer);
 }
-    assert_referrer_header_matches(&origin_info, request_url, expected_referrer);
-}
+ 
 
 #[test]
 fn test_no_referrer_set_with_noreferrerwhendowngrade_policy_https_to_http() {
