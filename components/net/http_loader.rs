@@ -437,6 +437,30 @@ fn no_referrer_when_downgrade_header(referrer_url: Url, url: Url) -> Option<Url>
     return strip_url(referrer_url, false);
 }
 
+fn strict_origin(referrer_url: Url, url: Url) -> Option<Url> {
+    if referrer_url.scheme() == "https" && url.scheme() != "https" {
+        return None;
+    }
+    else {
+	    return strip_url(referrer_url, true);
+    }
+}
+
+fn strict_origin_when_cross_origin(referrer_url: Url, url: Url) -> Option<Url> {
+    let cross_origin = referrer_url.origin() != url.origin();
+    if referrer_url.scheme() == "https" && url.scheme() != "https" {
+        return None;
+    }
+    else {
+        if cross_origin {
+            return strip_url(referrer_url, true);
+        }
+        else {
+            return strip_url(referrer_url, false);
+        }
+    }
+}
+
 /// https://w3c.github.io/webappsec-referrer-policy/#strip-url
 fn strip_url(mut referrer_url: Url, origin_only: bool) -> Option<Url> {
     if referrer_url.scheme() == "https" || referrer_url.scheme() == "http" {
@@ -467,6 +491,8 @@ pub fn determine_request_referrer(headers: &mut Headers,
             Some(ReferrerPolicy::SameOrigin) => if cross_origin { None } else { strip_url(ref_url, false) },
             Some(ReferrerPolicy::UnsafeUrl) => strip_url(ref_url, false),
             Some(ReferrerPolicy::OriginWhenCrossOrigin) => strip_url(ref_url, cross_origin),
+            Some(ReferrerPolicy::StrictOrigin) => strict_origin(ref_url, url),
+            Some(ReferrerPolicy::StrictOriginWhenCrossOrigin) => strict_origin_when_cross_origin(ref_url, url),
             Some(ReferrerPolicy::NoReferrerWhenDowngrade) | None =>
                 no_referrer_when_downgrade_header(ref_url, url),
         };
